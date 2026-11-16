@@ -17,7 +17,7 @@ let modal = null; // {itemId, initial, draft, touched:Set}
 let selectedForBulk = new Set();
 let busy = false;
 let toastTimer;
-let returningToStudent = false;
+let signingOut = false;
 const loadingScreen = '<div class="loading-screen">우리 반 제출 현황판을 불러옵니다.</div>';
 
 function toast(message, error = false) {
@@ -67,9 +67,10 @@ function header() {
   return `<header class="site-header"><div class="header-content">
     <div class="brand"><span class="logo">✓</span> 우리 반 제출 현황판</div>
     <div class="header-actions">
-      ${view === 'teacher' ? `<span class="hint">교사 관리</span><button class="btn small" data-action="sign-out">학생 화면으로</button>`
+      ${view === 'teacher' ? `<button class="btn small" data-action="go-student">학생 화면으로</button>`
         : view === 'login' ? `<button class="btn small" data-action="go-student">돌아가기</button>`
         : `<button class="btn small" data-action="go-teacher">교사 관리 페이지</button>`}
+      ${state.teacher ? '<button class="btn small" data-action="sign-out">교사 로그아웃</button>' : ''}
     </div></div></header>`;
 }
 function demoBanner() {
@@ -226,7 +227,7 @@ function renderStudents() {
     </tbody></table></div></section>`;
 }
 function render() {
-  if (returningToStudent) { $app.innerHTML = header() + loadingScreen; return; }
+  if (signingOut) { $app.innerHTML = header() + loadingScreen; return; }
   const content = view === 'login' ? renderLogin()
     : !state.unlocked ? renderClassroomLogin()
     : view === 'teacher' && state.teacher ? renderTeacher() : renderStudent();
@@ -276,18 +277,19 @@ async function handleClick(event) {
       await store.loginTeacher(); view = 'teacher'; render();
     } else { view = state.teacher ? 'teacher' : 'login'; render(); }
   }
-  if (action === 'go-student') { view = 'student'; render(); }
+  if (action === 'go-student') { modal = null; view = 'student'; render(); }
   if (action === 'sign-out') {
-    returningToStudent = true;
+    if (!state.teacher) return;
+    signingOut = true;
     modal = null;
     await withBusy(async () => {
       try {
         await store.logoutTeacher();
         view = 'student';
       } finally {
-        returningToStudent = false;
+        signingOut = false;
       }
-    }, '학생 화면으로 이동했습니다.');
+    }, '교사 계정에서 로그아웃했습니다.');
   }
   if (action === 'open-modal' && state.unlocked) openModal(targetId);
   if (action === 'close-modal') { modal = null; render(); }
