@@ -89,7 +89,7 @@ function renderStudent() {
     <div class="cards">${items.map(item => {
       const counts = itemCounts(item.id);
       return `<button class="card click-card" data-action="open-modal" data-id="${h(item.id)}" aria-label="${h(item.title)} 제출 상태 체크하기">
-        <div class="card-head"><div><div class="item-name">${h(item.title)}</div><div class="item-meta">${item.dueDate ? `제출 기한: ${h(formatDueDate(item.dueDate))}` : '제출 기한 없음'}</div></div>
+        <div class="card-head"><div><div class="item-name">${h(item.title)}</div>${item.dueDate ? `<div class="item-meta">제출 기한: ${h(formatDueDate(item.dueDate))}</div>` : ''}</div>
         ${item.allowProgress ? '<span class="pill">진행 중 사용</span>' : ''}</div>
         ${numberGrid(item)}
         <div class="card-foot"><span class="summary">${counts.eligible ? `완료 ${counts.done}/${counts.eligible}명${item.allowProgress ? ` · 진행 중 ${counts.progress}명` : ''}` : '제출 대상 없음'}${counts.excluded ? ` · 제출 제외 ${counts.excluded}명` : ''}</span></div>
