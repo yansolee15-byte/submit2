@@ -1,6 +1,6 @@
-import { createStore } from './store.js?v12';
+import { createStore } from './store.js?v15';
 import { NONE, PROGRESS, DONE, EXCLUDED, nextStatus, statusLabel, statusIcon,
-  getStatus, stats, escapeHTML as h, orderedStudents, orderedItems, isExcluded, displayStatus } from './model.js?v08';
+  getStatus, stats, escapeHTML as h, orderedStudents, orderedItems, isExcluded, displayStatus } from './model.js?v15';
 
 const $app = document.getElementById('app');
 let store;
@@ -16,6 +16,9 @@ let editingStudentId = null;
 let modal = null; // {itemId, initial, draft, touched:Set}
 let selectedForBulk = new Set();
 let busy = false;
+let movingItem = false;
+let itemDrag = null;
+let suppressDropClickUntil = 0;
 let toastTimer;
 let signingOut = false;
 const loadingScreen = '<div class="loading-screen">우리 반 제출 현황판을 불러옵니다.</div>';
@@ -188,6 +191,8 @@ function renderTeacherItemTable(item) {
 }
 function renderItems() {
   const item = itemById(editingItemId);
+  const items = orderedItems(state.data.items);
+  const activeCount = items.filter(i => !i.archived).length;
   return `<section class="panel"><h2>${item ? '제출 항목 수정' : '새 제출 항목 추가'}</h2>
   <form data-form="item" class="form-grid">
     <div class="field"><label for="item-title">제출 항목명 *</label><input id="item-title" name="title" maxlength="100" value="${h(item?.title ?? '')}" placeholder="예: 현장체험학습 신청서" required /></div>
@@ -199,9 +204,14 @@ function renderItems() {
     </fieldset>
     <div class="row"><button class="btn primary" type="submit" ${busy ? 'disabled' : ''}>${item ? '수정 저장' : '항목 추가'}</button>${item ? '<button type="button" class="btn" data-action="cancel-edit-item">수정 취소</button>' : ''}</div>
   </form></section>
-  <section class="panel"><h2>등록된 항목 ${state.data.items.length}개</h2><div class="table-wrap"><table>
-    <thead><tr><th>항목명</th><th>방식</th><th>상태</th><th>관리</th></tr></thead><tbody>
-    ${orderedItems(state.data.items).map(i => `<tr><td><strong>${h(i.title)}</strong><div class="help">${i.dueDate ? h(formatDueDate(i.dueDate)) : '기한 없음'}</div></td>
+  <section class="panel"><h2>등록된 항목 ${items.length}개</h2>
+    <p class="help">⠿ 손잡이를 끌어 순서를 바꿀 수 있습니다. 한 번 누르면 위·아래 이동 버튼이 열립니다.</p><div class="table-wrap" data-reorder-table><table>
+    <thead><tr><th scope="col">순서</th><th scope="col">항목명</th><th scope="col">방식</th><th scope="col">상태</th><th scope="col">관리</th></tr></thead><tbody>
+    ${items.map((i,index) => `<tr ${i.archived ? '' : `data-sort-row="${h(i.id)}"`}><td class="reorder-cell">${i.archived ? '—' : `<button type="button" class="btn small reorder-handle" data-action="item-reorder-menu" data-id="${h(i.id)}" aria-label="${h(i.title)} 순서 변경" aria-controls="reorder-options-${index}" aria-expanded="false" ${activeCount < 2 || busy ? 'disabled' : ''}><span aria-hidden="true">⠿</span></button>
+      <div id="reorder-options-${index}" class="reorder-options" data-reorder-options hidden>
+      <button type="button" class="btn small" data-action="move-item-up" data-id="${h(i.id)}" aria-label="${h(i.title)} 위로 이동" ${index === 0 || busy ? 'disabled' : ''}>↑ 위로 이동</button>
+      <button type="button" class="btn small" data-action="move-item-down" data-id="${h(i.id)}" aria-label="${h(i.title)} 아래로 이동" ${index === activeCount - 1 || busy ? 'disabled' : ''}>↓ 아래로 이동</button></div>`}</td>
+      <td><strong>${h(i.title)}</strong><div class="help">${i.dueDate ? h(formatDueDate(i.dueDate)) : '기한 없음'}</div></td>
       <td>${i.allowProgress ? '진행 중 허용' : '완료 체크'}${itemCounts(i.id).excluded ? `<div class="help">제출 제외 ${itemCounts(i.id).excluded}명</div>` : ''}</td><td>${i.archived ? '보관됨' : '사용 중'}</td>
       <td><div class="table-actions"><button class="btn small" data-action="edit-item" data-id="${h(i.id)}">수정</button>
       <button class="btn small" data-action="archive-item" data-id="${h(i.id)}">${i.archived ? '복원' : '보관'}</button>
@@ -268,10 +278,114 @@ async function saveModal() {
 function uniqueNumber(number, exceptId = null) {
   return state.data.students.some(s => Number(s.number) === number && s.id !== exceptId);
 }
+function closeReorderMenus() {
+  for (const handle of $app.querySelectorAll?.('.reorder-handle[aria-expanded="true"]') ?? []) {
+    handle.setAttribute('aria-expanded', 'false');
+    const options = document.getElementById(handle.getAttribute('aria-controls'));
+    if (options) options.hidden = true;
+  }
+}
+function resetDropHighlight(drag) {
+  drag.targetRow?.classList.remove('sort-before', 'sort-after');
+  drag.sourceRow?.classList.remove('sort-source');
+  drag.targetRow = drag.sourceRow = null;
+}
+function updateDropHighlight(drag) {
+  resetDropHighlight(drag);
+  drag.target = null;
+  const table = $app.querySelector('[data-reorder-table]');
+  const rows = [...(table?.querySelectorAll('[data-sort-row]') ?? [])];
+  const bounds = table?.getBoundingClientRect();
+  if (!bounds || rows.length < 2) return;
+  drag.sourceRow = rows.find(row => row.dataset.sortRow === drag.id);
+  if (!drag.sourceRow) return;
+  drag.sourceRow.classList.add('sort-source');
+  if (drag.x < bounds.left - 24 || drag.x > bounds.right + 24 || drag.y < bounds.top - 24 || drag.y > bounds.bottom + 24) return;
+  const row = rows.find(row => drag.y < row.getBoundingClientRect().bottom) ?? rows.at(-1);
+  if (row === drag.sourceRow) return;
+  const rect = row.getBoundingClientRect();
+  drag.placement = drag.y < (rect.top + rect.bottom) / 2 ? 'before' : 'after';
+  drag.target = row.dataset.sortRow;
+  drag.targetRow = row;
+  row.classList.add('sort-' + drag.placement);
+}
+function tickItemDrag() {
+  const drag = itemDrag;
+  if (!drag?.started) return;
+  const bounds = $app.querySelector('[data-reorder-table]')?.getBoundingClientRect();
+  // Scroll the page when a dragged item approaches a viewport edge.
+  if (bounds && drag.x >= bounds.left - 24 && drag.x <= bounds.right + 24) {
+    const edge = 75;
+    const speed = drag.y < edge ? -Math.min(18, Math.ceil((edge - drag.y) / 4))
+      : drag.y > window.innerHeight - edge ? Math.min(18, Math.ceil((drag.y - (window.innerHeight - edge)) / 4)) : 0;
+    if (speed) {
+      window.scrollBy(0, speed);
+      updateDropHighlight(drag);
+    }
+  }
+  drag.frame = requestAnimationFrame(tickItemDrag);
+}
+function startItemDrag(event) {
+  if (event.isPrimary === false || event.button !== 0 || itemDrag || busy || movingItem || view !== 'teacher' || teacherTab !== 'items' || !state.teacher) return;
+  const handle = event.target.closest('.reorder-handle');
+  if (!handle || handle.disabled) return;
+  itemDrag = {id:handle.dataset.id, pointer:event.pointerId, startX:event.clientX, startY:event.clientY, x:event.clientX, y:event.clientY, started:false};
+}
+function moveItemDrag(event) {
+  const drag = itemDrag;
+  if (!drag || drag.pointer !== event.pointerId) return;
+  drag.x = event.clientX;
+  drag.y = event.clientY;
+  if (!drag.started) {
+    if (Math.abs(drag.y - drag.startY) < 7 && Math.abs(drag.x - drag.startX) < 7) return;
+    drag.started = true;
+    closeReorderMenus();
+    $app.classList.add('sorting-items');
+    $app.setPointerCapture?.(event.pointerId);
+    drag.frame = requestAnimationFrame(tickItemDrag);
+  }
+  updateDropHighlight(drag);
+}
+function finishItemDrag(event, cancelled = false) {
+  const drag = itemDrag;
+  if (!drag || (event && drag.pointer !== event.pointerId)) return;
+  itemDrag = null;
+  if (!drag.started) return;
+  if (!cancelled) {
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    updateDropHighlight(drag);
+  }
+  cancelAnimationFrame(drag.frame);
+  resetDropHighlight(drag);
+  $app.classList.remove('sorting-items');
+  if ($app.hasPointerCapture?.(drag.pointer)) $app.releasePointerCapture(drag.pointer);
+  suppressDropClickUntil = Date.now() + 450;
+  if (!cancelled && drag.target) void moveOrderItem(drag.id, drag.target, drag.placement);
+}
+async function moveOrderItem(id, directionOrTarget, placement) {
+  if (view !== 'teacher' || teacherTab !== 'items' || !state.teacher || busy || movingItem) return;
+  movingItem = true;
+  try {
+    if (await store.moveItem(id, directionOrTarget, placement)) toast('항목 순서를 저장했습니다.');
+  } catch (e) { showError(e); }
+  finally { movingItem = false; }
+}
 async function handleClick(event) {
+  if (event.detail > 0 && Date.now() < suppressDropClickUntil) return;
   const button = event.target.closest('[data-action]');
-  if (!button || busy) return;
+  if (!button || busy || movingItem) return;
   const action = button.dataset.action, targetId = button.dataset.id;
+  if (action === 'item-reorder-menu') {
+    if (button.disabled) return;
+    const options = document.getElementById(button.getAttribute('aria-controls'));
+    if (!options) return;
+    const open = options.hidden;
+    closeReorderMenus();
+    options.hidden = !open;
+    button.setAttribute('aria-expanded', String(open));
+    return;
+  }
   if (action === 'go-teacher') {
     if (store.mode === 'demo') {
       await store.loginTeacher(); view = 'teacher'; render();
@@ -318,6 +432,12 @@ async function handleClick(event) {
     await withBusy(() => store.saveSubmissions(item.id, updates), '선택한 학생의 상태를 변경했습니다.');
     selectedForBulk.clear(); render();
   }
+  if (action === 'move-item-up' || action === 'move-item-down') {
+    if (!button.disabled) {
+      closeReorderMenus();
+      await moveOrderItem(targetId, action === 'move-item-up' ? -1 : 1);
+    }
+  }
   if (action === 'edit-item') { editingItemId = targetId; render(); window.scrollTo({top:0,behavior:'smooth'}); }
   if (action === 'cancel-edit-item') { editingItemId = null; render(); }
   if (action === 'archive-item') {
@@ -345,6 +465,7 @@ async function handleSubmit(event) {
   const form = event.target.closest('[data-form]');
   if (!form) return;
   event.preventDefault();
+  if (movingItem) return;
   const values = new FormData(form);
   if (form.dataset.form === 'classroom-login') {
     await withBusy(() => store.loginClassroom(values.get('password')));
@@ -410,7 +531,23 @@ function handleChange(event) {
 $app.addEventListener('click', event => { handleClick(event).catch(showError); });
 $app.addEventListener('submit', event => { handleSubmit(event).catch(showError); });
 $app.addEventListener('change', handleChange);
+$app.addEventListener('pointerdown', startItemDrag);
+$app.addEventListener('lostpointercapture', event => {
+  if (event.target === $app) finishItemDrag(event, true);
+});
+document.addEventListener('pointerdown', () => { suppressDropClickUntil = 0; }, true);
+document.addEventListener('pointermove', moveItemDrag);
+document.addEventListener('pointerup', event => finishItemDrag(event));
+document.addEventListener('pointercancel', event => finishItemDrag(event, true));
+document.addEventListener('click', event => {
+  if (!event.target.closest?.('.reorder-cell')) closeReorderMenus();
+});
 document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && itemDrag) { finishItemDrag(null, true); return; }
+  if (event.key === 'Escape' && event.target?.closest?.('[data-reorder-options]')) {
+    event.target.closest('.reorder-cell')?.querySelector('.reorder-handle')?.focus();
+  }
+  if (event.key === 'Escape') closeReorderMenus();
   if (event.key === 'Escape' && modal && !busy) { modal = null; render(); }
 });
 try {

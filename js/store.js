@@ -1,4 +1,4 @@
-import { NONE, PROGRESS, DONE, submissionId, orderedStudents, isExcluded } from './model.js?v08';
+import { NONE, PROGRESS, DONE, submissionId, orderedStudents, isExcluded, itemMoveUpdates } from './model.js?v15';
 import { firebaseConfig, teacherUid } from './config.js';
 import { classroomAccountName } from './classroom-access.js?v12';
 import { checkFirebaseConfiguration } from './config-check.js';
@@ -47,7 +47,7 @@ export async function createStore(onChange, onError) {
 
 function createDemoStore(onChange) {
   let data;
-  try { data = JSON.parse(localStorage.getItem(DEMO_KEY)) || exampleData(); }
+  try { data = JSON.parse(localStorage.getItem(DEMO_KEY) ?? localStorage.getItem('classroom-submission-board-v1')) || exampleData(); }
   catch { data = exampleData(); }
   let teacher = false;
   function sync() {
@@ -85,9 +85,17 @@ function createDemoStore(onChange) {
     async addItem(item) {
       data.items.push({...item, id: id(), archived: false}); sync();
     },
+    async moveItem(itemId, directionOrTarget, placement) {
+      if (!teacher) throw new Error('교사 인증이 필요합니다.');
+      const updates = new Map(itemMoveUpdates(data.items, itemId, directionOrTarget, placement).map(i => [i.id, i.displayOrder]));
+      if (!updates.size) return false;
+      data.items = data.items.map(item => updates.has(item.id) ? {...item, displayOrder:updates.get(item.id)} : item);
+      sync();
+      return true;
+    },
     async updateItem(itemId, updates) {
       const wasProgress = data.items.find(item => item.id === itemId)?.allowProgress;
-      data.items = data.items.map(item => item.id === itemId ? {...item, ...updates} : item);
+      data.items = data.items.map(item => item.id === itemId ? {...item, ...updates, ...('archived' in updates ? {displayOrder:null} : {})} : item);
       if (wasProgress && updates.allowProgress === false) {
         data.submissions = data.submissions.map(s => s.itemId === itemId && s.status === PROGRESS ? {...s, status: NONE} : s);
       }
@@ -336,11 +344,20 @@ async function createFirebaseStore(onChange, onError) {
       teacherOnly();
       await dbSdk.addDoc(dbSdk.collection(db, 'items'), {...item, archived: false, createdAt: stamp()});
     },
+    async moveItem(itemId, directionOrTarget, placement) {
+      teacherOnly();
+      const updates = itemMoveUpdates(data.items, itemId, directionOrTarget, placement);
+      if (!updates.length) return false;
+      const w = batch();
+      for (const {id, displayOrder} of updates) w.update(ref('items', id), {displayOrder});
+      await w.commit();
+      return true;
+    },
     async updateItem(itemId, updates) {
       teacherOnly();
       const oldItem = data.items.find(i => i.id === itemId);
       const w = batch();
-      w.update(ref('items', itemId), updates);
+      w.update(ref('items', itemId), 'archived' in updates ? {...updates, displayOrder:null} : updates);
       if (oldItem?.allowProgress && updates.allowProgress === false) {
         for (const record of data.submissions.filter(s => s.itemId === itemId && s.status === PROGRESS)) {
           w.update(ref('submissions', record.id), {status: NONE, updatedAt: stamp()});

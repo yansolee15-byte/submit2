@@ -55,5 +55,27 @@ export function orderedStudents(students) {
 }
 
 export function orderedItems(items) {
-  return [...items].sort((a, b) => Number(a.archived) - Number(b.archived) || (a.dueDate || '9999').localeCompare(b.dueDate || '9999') || a.title.localeCompare(b.title, 'ko'));
+  const rank = item => Number.isSafeInteger(item.displayOrder) && item.displayOrder >= 0
+    ? item.displayOrder : Number.MAX_SAFE_INTEGER;
+  return [...items].sort((a, b) => Number(Boolean(a.archived)) - Number(Boolean(b.archived))
+    || (!a.archived && !b.archived ? rank(a) - rank(b) : 0)
+    || (a.dueDate || '9999').localeCompare(b.dueDate || '9999')
+    || a.title.localeCompare(b.title, 'ko') || String(a.id ?? '').localeCompare(String(b.id ?? '')));
+}
+
+export function itemMoveUpdates(items, id, directionOrTarget, placement) {
+  const active = orderedItems(items.filter(item => !item.archived));
+  const from = active.findIndex(item => item.id === id);
+  let to;
+  if (directionOrTarget === -1 || directionOrTarget === 1) {
+    to = from + directionOrTarget;
+  } else {
+    const target = active.findIndex(item => item.id === directionOrTarget);
+    if (target < 0 || target === from || !['before', 'after'].includes(placement)) return [];
+    to = target + (placement === 'after' ? 1 : 0) - (from < target ? 1 : 0);
+  }
+  if (from < 0 || to < 0 || to >= active.length) return [];
+  if (from === to) return [];
+  active.splice(to, 0, active.splice(from, 1)[0]);
+  return active.flatMap((item, displayOrder) => item.displayOrder === displayOrder ? [] : [{id:item.id, displayOrder}]);
 }
